@@ -24,7 +24,7 @@ const LazyLogo = ({
   const allowLogoRendering = useLogosStore((s) => s.allowLogoRendering);
 
   // Determine the logo source
-  const logoData = logoId && logos[logoId];
+  const logoData = logoId && logos[+logoId];
   const logoSrc = logoData?.cache_url || fallbackSrc;
 
   // Cleanup on unmount

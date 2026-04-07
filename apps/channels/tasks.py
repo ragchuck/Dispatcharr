@@ -3878,6 +3878,240 @@ def set_channels_logos_from_epg(self, channel_ids):
         raise
 
 
+# ---------------------------------------------------------------------------
+# Logo auto-matching — private helpers and tasks
+# ---------------------------------------------------------------------------
+
+def _find_best_logo_match(norm_channel, db_logos, file_candidates,
+                          threshold=None):
+    """
+    Score all logo candidates against *norm_channel* (already normalised) and
+    return the best match above *threshold*.
+
+    File candidates whose path is already registered as a DB logo URL are
+    skipped — they are represented in db_logos and must not produce duplicates.
+
+    Returns (score, db_logo_id, file_path, file_display_name).
+    Exactly one of db_logo_id / file_path will be non-None on a match;
+    both are None when no candidate exceeds the threshold.
+    """
+    from .utils import LOGO_MATCH_THRESHOLD
+
+    if threshold is None:
+        threshold = LOGO_MATCH_THRESHOLD
+
+    def _score(a, b):
+        return max(fuzz.token_sort_ratio(a, b), fuzz.partial_ratio(a, b))
+
+    registered_urls = {entry["url"] for entry in db_logos}
+    best_score = -1
+    best_db_logo_id = None
+    best_file_path = None
+    best_file_name = None
+
+    for entry in db_logos:
+        s = _score(norm_channel, entry["norm_name"])
+        if s > best_score:
+            best_score = s
+            best_db_logo_id = entry["id"]
+            best_file_path = None
+
+    for fpath, fname, norm_file in file_candidates:
+        if fpath in registered_urls:
+            continue
+        s = _score(norm_channel, norm_file)
+        if s > best_score:
+            best_score = s
+            best_db_logo_id = None
+            best_file_path = fpath
+            best_file_name = fname
+
+    if best_score < threshold:
+        return best_score, None, None, None
+
+    return best_score, best_db_logo_id, best_file_path, best_file_name
+
+
+def _match_logos_for_channels(task_self, channels):
+    """
+    Core batch-matching loop shared by match_logo_channels and
+    match_selected_channels_logo.
+
+    *channels* must be a list of Channel instances that have no logo assigned.
+    Returns the result dict.
+    """
+    from .models import Logo
+    from .utils import build_logo_candidates, normalize_logo_name
+    from core.utils import send_websocket_update
+
+    task_id = task_self.request.id
+    total = len(channels)
+    updated_count = 0
+    created_logos_count = 0
+    errors = []
+
+    send_websocket_update('updates', 'update', {
+        'type': 'auto_match_logo_progress',
+        'task_id': task_id,
+        'progress': 0,
+        'total': total,
+        'status': 'running',
+        'message': 'Building logo candidate list...',
+    })
+
+    db_logos, file_candidates = build_logo_candidates()
+
+    batch_size = 50
+    for i in range(0, total, batch_size):
+        batch = channels[i:i + batch_size]
+        batch_updates = []
+
+        for channel in batch:
+            try:
+                norm_name = normalize_logo_name(channel.name)
+                best_score, db_logo_id, file_path, file_name = _find_best_logo_match(
+                    norm_name, db_logos, file_candidates
+                )
+
+                if db_logo_id is None and file_path is None:
+                    continue
+
+                if file_path:
+                    logo_obj, created = Logo.objects.get_or_create(
+                        url=file_path,
+                        defaults={"name": file_name or os.path.basename(file_path)},
+                    )
+                    if created:
+                        created_logos_count += 1
+                        db_logos.append({
+                            'id': logo_obj.id,
+                            'name': logo_obj.name,
+                            'url': logo_obj.url,
+                            'norm_name': normalize_logo_name(logo_obj.name),
+                        })
+                    target_logo_id = logo_obj.id
+                else:
+                    target_logo_id = db_logo_id
+
+                channel.logo_id = target_logo_id
+                batch_updates.append(channel)
+                updated_count += 1
+                logger.debug(f"Channel '{channel.name}' => logo id={target_logo_id} (score={best_score})")
+
+            except Exception as e:
+                errors.append(f"Channel {channel.id}: {str(e)}")
+                logger.error(f"Error processing channel {channel.id}: {e}")
+
+        if batch_updates:
+            Channel.objects.bulk_update(batch_updates, ['logo'])
+
+        send_websocket_update('updates', 'update', {
+            'type': 'auto_match_logo_progress',
+            'task_id': task_id,
+            'progress': min(i + batch_size, total),
+            'total': total,
+            'status': 'running',
+            'message': f'Matched {updated_count} channel logos...',
+            'updated_count': updated_count,
+            'created_logos_count': created_logos_count,
+        })
+
+    send_websocket_update('updates', 'update', {
+        'type': 'auto_match_logo_progress',
+        'task_id': task_id,
+        'progress': total,
+        'total': total,
+        'status': 'completed',
+        'message': f'Auto-matched {updated_count} channel logos ({created_logos_count} new logos created)',
+        'updated_count': updated_count,
+        'created_logos_count': created_logos_count,
+        'error_count': len(errors),
+        'errors': errors,
+    })
+
+    logger.info(f"Logo matching completed: {updated_count} matched, {created_logos_count} created")
+    return {
+        'status': 'completed',
+        'updated_count': updated_count,
+        'created_logos_count': created_logos_count,
+        'error_count': len(errors),
+        'errors': errors,
+    }
+
+
+@shared_task(bind=True)
+def match_logo_channels(self):
+    """Auto-match logos for all channels that do not yet have a logo assigned."""
+    try:
+        channels = list(Channel.objects.filter(logo__isnull=True))
+        logger.info(f"Starting logo matching for {len(channels)} channels without a logo")
+        return _match_logos_for_channels(self, channels)
+    except Exception as e:
+        logger.error(f"match_logo_channels failed: {e}")
+        raise
+
+
+@shared_task(bind=True)
+def match_selected_channels_logo(self, channel_ids):
+    """Auto-match logos for the specified channels that do not yet have a logo assigned."""
+    try:
+        channels = list(Channel.objects.filter(id__in=channel_ids, logo__isnull=True))
+        logger.info(f"Starting logo matching for {len(channels)} selected channels without a logo")
+        return _match_logos_for_channels(self, channels)
+    except Exception as e:
+        logger.error(f"match_selected_channels_logo failed: {e}")
+        raise
+
+
+def _match_single_channel_logo(channel_id):
+    """Core logic for matching a single channel's logo. Callable directly for testing."""
+    from .models import Logo
+    from .utils import build_logo_candidates, normalize_logo_name
+
+    try:
+        channel = Channel.objects.get(id=channel_id)
+    except Channel.DoesNotExist:
+        return {"matched": False, "message": "Channel not found"}
+
+    if channel.logo_id is not None:
+        return {"matched": False, "message": f"Channel '{channel.name}' already has a logo assigned"}
+
+    db_logos, file_candidates = build_logo_candidates()
+    norm_name = normalize_logo_name(channel.name)
+    best_score, db_logo_id, file_path, file_name = _find_best_logo_match(
+        norm_name, db_logos, file_candidates
+    )
+
+    if db_logo_id is None and file_path is None:
+        return {"matched": False, "message": f"No logo found for '{channel.name}' (best score: {best_score})"}
+
+    if file_path:
+        logo_obj, _ = Logo.objects.get_or_create(
+            url=file_path,
+            defaults={"name": file_name or os.path.basename(file_path)},
+        )
+    else:
+        logo_obj = Logo.objects.get(id=db_logo_id)
+
+    channel.logo = logo_obj
+    channel.save(update_fields=['logo'])
+
+    return {
+        "matched": True,
+        "message": f"Matched logo '{logo_obj.name}' for channel '{channel.name}' (score: {best_score})",
+        "logo_id": logo_obj.id,
+    }
+
+
+@shared_task(bind=True)
+def match_single_channel_logo(self, channel_id):
+    """
+    Try to match a single channel with a logo. Returns a result dict.
+    Intended to be called synchronously via apply_async(...).get().
+    """
+    return _match_single_channel_logo(channel_id)
+
+
 @shared_task(bind=True)
 def set_channels_tvg_ids_from_epg(self, channel_ids):
     """

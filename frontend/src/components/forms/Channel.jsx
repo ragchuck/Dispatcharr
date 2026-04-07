@@ -183,6 +183,43 @@ const ChannelForm = ({ channel = null, isOpen, onClose }) => {
     }
   };
 
+  const [autoMatchLogoLoading, setAutoMatchLogoLoading] = useState(false);
+
+  const handleAutoMatchLogo = async () => {
+    setAutoMatchLogoLoading(true);
+    try {
+      const response = await API.autoMatchLogo(channel.id);
+      if (response.matched) {
+        if (response.logo) {
+          useLogosStore.getState().addLogo(response.logo);
+          setValue('logo_id', `${response.logo.id}`);
+        }
+        API.requeryChannels();
+        notifications.show({
+          title: 'Logo Matched',
+          message: response.logo
+            ? `Matched "${response.logo.name}" (score: ${Math.round(response.score)})`
+            : response.message,
+          color: 'green',
+        });
+      } else {
+        notifications.show({
+          title: 'No Match Found',
+          message: response.message || 'No logo matched the channel name.',
+          color: 'orange',
+        });
+      }
+    } catch {
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to auto-match logo',
+        color: 'red',
+      });
+    } finally {
+      setAutoMatchLogoLoading(false);
+    }
+  };
+
   const handleSetLogoFromEpg = async () => {
     const epgDataId = watch('epg_data_id');
     if (!epgDataId) {
@@ -687,6 +724,23 @@ const ChannelForm = ({ channel = null, isOpen, onClose }) => {
                               Use EPG Logo
                             </Button>
                           )}
+                          <Button
+                            size="xs"
+                            variant="transparent"
+                            onClick={handleAutoMatchLogo}
+                            loading={autoMatchLogoLoading}
+                            disabled={!channel?.id}
+                            title={
+                              !channel?.id
+                                ? 'Auto-match is only available for existing channels'
+                                : 'Auto-match best logo by channel name'
+                            }
+                            p={0}
+                            h="auto"
+                            leftSection={<Zap size="14" />}
+                          >
+                            Auto Match
+                          </Button>
                         </Group>
                       }
                       readOnly

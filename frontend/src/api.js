@@ -796,6 +796,22 @@ export default class API {
     }
   }
 
+  static async autoMatchChannelLogos(channelIds) {
+    try {
+      const response = await request(
+        `${host}/api/channels/channels/match-logos/`,
+        {
+          method: 'POST',
+          body: channelIds?.length ? { channel_ids: channelIds } : {},
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification('Failed to start logo matching task', e);
+      throw e;
+    }
+  }
+
   static async setChannelLogosFromEpg(channelIds) {
     try {
       const response = await request(
@@ -2361,6 +2377,19 @@ export default class API {
       return response;
     } catch (e) {
       errorNotification('Failed to cleanup unused logos', e);
+      throw e;
+    }
+  }
+
+  static async autoMatchLogo(channelId) {
+    try {
+      const response = await request(
+        `${host}/api/channels/channels/${channelId}/match-logo/`,
+        { method: 'POST' }
+      );
+      return response;
+    } catch (e) {
+      errorNotification('Failed to auto-match logo', e);
       throw e;
     }
   }

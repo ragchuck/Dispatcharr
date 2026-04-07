@@ -52,6 +52,9 @@ from .tasks import (
     evaluate_series_rules_impl,
     match_single_channel_epg,
     match_selected_channels_epg,
+    match_logo_channels,
+    match_selected_channels_logo,
+    match_single_channel_logo,
     sync_recurring_rule_impl,
     purge_recurring_rule_impl,
 )
@@ -900,6 +903,63 @@ class ChannelViewSet(viewsets.ModelViewSet):
             "task_id": task.id,
             "channel_count": len(channel_ids)
         })
+
+    @action(detail=False, methods=["post"], url_path="match-logos")
+    def match_logos(self, request):
+        """
+        Kick off logo matching. If channel_ids are provided only those channels
+        are processed; otherwise all channels without a logo are processed.
+        Channels that already have a logo are always skipped.
+        """
+        channel_ids = request.data.get("channel_ids", [])
+
+        if channel_ids:
+            match_selected_channels_logo.delay(channel_ids)
+            message = f"Logo matching task initiated for {len(channel_ids)} selected channel(s)."
+        else:
+            match_logo_channels.delay()
+            message = "Logo matching task initiated for all channels without a logo."
+
+        return Response({"message": message}, status=status.HTTP_202_ACCEPTED)
+
+    @extend_schema(
+        methods=["POST"],
+        description="Try to auto-match this specific channel with logo.",
+    )
+    @action(detail=True, methods=["post"], url_path="match-logo")
+    def match_channel_logo(self, request, pk=None):
+        """Find and return the best-matching logo for a saved channel."""
+        from .utils import build_logo_candidates, normalize_logo_name
+        from .tasks import _find_best_logo_match
+
+        channel = self.get_object()
+
+        db_logos, file_candidates = build_logo_candidates()
+        best_score, db_logo_id, file_path, file_name = _find_best_logo_match(
+            normalize_logo_name(channel.name), db_logos, file_candidates
+        )
+
+        if db_logo_id is None and file_path is None:
+            return Response(
+                {"matched": False, "message": f"No logo found for '{channel.name}' (best score: {best_score})"},
+                status=status.HTTP_200_OK,
+            )
+
+        if file_path:
+            matched_logo, _ = Logo.objects.get_or_create(
+                url=file_path,
+                defaults={"name": file_name or os.path.basename(file_path)},
+            )
+        else:
+            matched_logo = Logo.objects.get(id=db_logo_id)
+
+        channel.logo = matched_logo
+        channel.save(update_fields=["logo"])
+
+        return Response(
+            {"matched": True, "score": best_score, "logo": LogoSerializer(matched_logo, context={"request": request}).data},
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=False, methods=["post"], url_path="set-tvg-ids-from-epg")
     def set_tvg_ids_from_epg(self, request):

@@ -459,6 +459,74 @@ export const WebsocketProvider = ({ children }) => {
               break;
             }
 
+            case 'auto_match_logo_progress': {
+              const progress = parsedEvent.data;
+              const id = 'auto-match-logo-progress';
+
+              if (progress.status === 'running' && progress.progress === 0) {
+                notifications.show({
+                  id,
+                  title: 'Auto-Matching Logos',
+                  message: `Processing ${progress.total} channels...`,
+                  color: 'teal',
+                  autoClose: false,
+                  withCloseButton: false,
+                  loading: true,
+                });
+              } else if (progress.status === 'running') {
+                let message = `Processed ${progress.progress} of ${progress.total} channels`;
+                if (progress.updated_count !== undefined) {
+                  message += ` (${progress.updated_count} matched)`;
+                }
+                if (progress.created_logos_count) {
+                  message += `, created ${progress.created_logos_count} logos`;
+                }
+                notifications.update({
+                  id,
+                  title: 'Auto-Matching Logos',
+                  message,
+                  color: 'teal',
+                  autoClose: false,
+                  withCloseButton: false,
+                  loading: true,
+                });
+              } else if (progress.status === 'completed') {
+                notifications.update({
+                  id,
+                  title: 'Logo Auto-Match Complete',
+                  message: `Matched ${progress.updated_count || 0} channel logos${progress.created_logos_count ? `, created ${progress.created_logos_count} new logos` : ''}`,
+                  color: progress.updated_count > 0 ? 'green.5' : 'orange',
+                  loading: false,
+                  autoClose: 6000,
+                });
+                try {
+                  await API.requeryChannels();
+                  await useChannelsStore.getState().fetchChannelIds();
+
+                  const channels = useChannelsStore.getState().channels;
+                  const logoIds = Object.values(channels)
+                    .filter((channel) => channel.logo_id)
+                    .map((channel) => channel.logo_id);
+
+                  if (logoIds.length > 0) {
+                    await useLogosStore.getState().fetchLogosByIds(logoIds);
+                  }
+                } catch (e) {
+                  console.warn('Failed to refresh channels after logo auto-match:', e);
+                }
+              } else if (progress.status === 'failed') {
+                notifications.update({
+                  id,
+                  title: 'Logo Auto-Match Failed',
+                  message: progress.message || 'An error occurred during logo auto-matching.',
+                  color: 'red',
+                  loading: false,
+                  autoClose: 8000,
+                });
+              }
+              break;
+            }
+
             case 'epg_name_setting_progress': {
               const progress = parsedEvent.data;
               const id = 'epg-name-setting-progress';

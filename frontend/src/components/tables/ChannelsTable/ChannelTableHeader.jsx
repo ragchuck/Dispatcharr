@@ -19,6 +19,7 @@ import {
   Binary,
   CircleCheck,
   EllipsisVertical,
+  Image,
   SquareMinus,
   SquarePen,
   SquarePlus,
@@ -125,6 +126,8 @@ const ChannelTableHeader = ({
   const [assignNumbersModalOpen, setAssignNumbersModalOpen] = useState(false);
   const [groupManagerOpen, setGroupManagerOpen] = useState(false);
   const [epgMatchModalOpen, setEpgMatchModalOpen] = useState(false);
+  const [confirmAutoMatchLogosOpen, setConfirmAutoMatchLogosOpen] = useState(false);
+  const [autoMatchingLogos, setAutoMatchingLogos] = useState(false);
   const [confirmDeleteProfileOpen, setConfirmDeleteProfileOpen] =
     useState(false);
   const [profileToDelete, setProfileToDelete] = useState(null);
@@ -234,6 +237,35 @@ const ChannelTableHeader = ({
     if (newVal) {
       // Ensure streamless toggle is cleared when enabling stale-only
       setShowOnlyStreamlessChannels(false);
+    }
+  };
+
+  const handleAutoMatchLogos = async () => {
+    if (isWarningSuppressed('batch-auto-match-logos')) {
+      return executeAutoMatchLogos();
+    }
+    setConfirmAutoMatchLogosOpen(true);
+  };
+
+  const executeAutoMatchLogos = async () => {
+    setAutoMatchingLogos(true);
+    try {
+      await API.autoMatchChannelLogos(selectedTableIds);
+      notifications.show({
+        title: 'Task Started',
+        message: `Started auto-matching logos for ${selectedTableIds.length} channels. Progress will be shown in notifications.`,
+        color: 'blue',
+      });
+    } catch (error) {
+      console.error('Failed to start auto-match logo task:', error);
+      notifications.show({
+        title: 'Error',
+        message: 'Failed to start auto-match logo task.',
+        color: 'red',
+      });
+    } finally {
+      setAutoMatchingLogos(false);
+      setConfirmAutoMatchLogosOpen(false);
     }
   };
 
@@ -431,8 +463,20 @@ const ChannelTableHeader = ({
               >
                 <Text size="xs">
                   {selectedTableIds.length > 0
-                    ? `Auto-Match (${selectedTableIds.length} selected)`
+                    ? `Auto-Match EPG (${selectedTableIds.length} selected)`
                     : 'Auto-Match EPG'}
+                </Text>
+              </Menu.Item>
+
+              <Menu.Item
+                leftSection={<Image size={18} />}
+                disabled={authUser.user_level != USER_LEVELS.ADMIN}
+                onClick={handleAutoMatchLogos}
+              >
+                <Text size="xs">
+                  {selectedTableIds.length > 0
+                    ? `Auto-Match Logos (${selectedTableIds.length} selected)`
+                    : 'Auto-Match Logos'}
                 </Text>
               </Menu.Item>
 
@@ -499,6 +543,28 @@ This action cannot be undone.`}
         confirmLabel="Delete"
         cancelLabel="Cancel"
         actionKey="delete-profile"
+        onSuppressChange={suppressWarning}
+        size="md"
+      />
+
+      <ConfirmationDialog
+        opened={confirmAutoMatchLogosOpen}
+        onClose={() => setConfirmAutoMatchLogosOpen(false)}
+        onConfirm={executeAutoMatchLogos}
+        loading={autoMatchingLogos}
+        title="Confirm Auto Match Logos"
+        message={
+          <div style={{ whiteSpace: 'pre-line' }}>
+            {`Are you sure you want to auto-match logos for ${selectedTableIds.length} selected channels?
+
+This will find the best-matching logo from the logo directory for each channel based on its name, and assign it. Channels that already have a logo will be skipped. New logos may be created in the database if files in /data/logos/ are not yet registered.
+
+Only channels where a match is found above the minimum score will be updated.`}
+          </div>
+        }
+        confirmLabel="Auto Match"
+        cancelLabel="Cancel"
+        actionKey="batch-auto-match-logos"
         onSuppressChange={suppressWarning}
         size="md"
       />
